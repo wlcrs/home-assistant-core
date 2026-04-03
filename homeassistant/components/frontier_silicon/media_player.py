@@ -59,23 +59,23 @@ class AFSAPIDevice(MediaPlayerEntity):
     _attr_has_entity_name = True
     _attr_name = None
 
-    _attr_supported_features = (
-        MediaPlayerEntityFeature.PAUSE
-        | MediaPlayerEntityFeature.VOLUME_SET
+    _BASE_SUPPORTED_FEATURES = (
+        MediaPlayerEntityFeature.VOLUME_SET
         | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.VOLUME_STEP
-        | MediaPlayerEntityFeature.PREVIOUS_TRACK
-        | MediaPlayerEntityFeature.NEXT_TRACK
-        | MediaPlayerEntityFeature.SEEK
         | MediaPlayerEntityFeature.PLAY_MEDIA
-        | MediaPlayerEntityFeature.PLAY
-        | MediaPlayerEntityFeature.STOP
         | MediaPlayerEntityFeature.TURN_ON
         | MediaPlayerEntityFeature.TURN_OFF
         | MediaPlayerEntityFeature.SELECT_SOURCE
-        | MediaPlayerEntityFeature.SELECT_SOUND_MODE
         | MediaPlayerEntityFeature.BROWSE_MEDIA
     )
+
+    # FM, DAB and AUXIN do not support play/pause/stop transport controls.
+    _MODES_WITHOUT_TRANSPORT = {"FM", "DAB", "AUXIN"}
+    # IR supports play/stop, but not pause.
+    _MODES_WITHOUT_PAUSE = {"IR", "FM", "DAB", "AUXIN"}
+    # IR, FM, DAB and AUXIN do not support previous/next/seek controls.
+    _MODES_WITHOUT_TRACK_CONTROLS = {"IR", "FM", "DAB", "AUXIN"}
 
     def __init__(self, unique_id: str, name: str | None, afsapi: AFSAPI) -> None:
         """Initialize the Frontier Silicon API device."""
@@ -92,6 +92,32 @@ class AFSAPIDevice(MediaPlayerEntity):
         self.__sound_modes_by_label: dict[str, str] | None = None
 
         self._supports_sound_mode: bool = True
+        self._current_mode_id: str | None = None
+
+    @property
+    def supported_features(self) -> MediaPlayerEntityFeature:
+        """Return supported features based on current mode and device capabilities."""
+        supported_features = self._BASE_SUPPORTED_FEATURES
+
+        if self._current_mode_id not in self._MODES_WITHOUT_TRANSPORT:
+            supported_features |= (
+                MediaPlayerEntityFeature.PLAY | MediaPlayerEntityFeature.STOP
+            )
+
+        if self._current_mode_id not in self._MODES_WITHOUT_PAUSE:
+            supported_features |= MediaPlayerEntityFeature.PAUSE
+
+        if self._current_mode_id not in self._MODES_WITHOUT_TRACK_CONTROLS:
+            supported_features |= (
+                MediaPlayerEntityFeature.PREVIOUS_TRACK
+                | MediaPlayerEntityFeature.NEXT_TRACK
+                | MediaPlayerEntityFeature.SEEK
+            )
+
+        if self._supports_sound_mode:
+            supported_features |= MediaPlayerEntityFeature.SELECT_SOUND_MODE
+
+        return supported_features
 
     async def async_update(self) -> None:
         """Get the latest date and update device state."""
@@ -100,12 +126,13 @@ class AFSAPIDevice(MediaPlayerEntity):
             if await afsapi.get_power():
                 status = await afsapi.get_play_status()
                 self._attr_state = {
+                    PlayState.IDLE: MediaPlayerState.IDLE,
+                    PlayState.BUFFERING: MediaPlayerState.BUFFERING,
                     PlayState.PLAYING: MediaPlayerState.PLAYING,
                     PlayState.PAUSED: MediaPlayerState.PAUSED,
+                    PlayState.REBUFFERING: MediaPlayerState.BUFFERING,
                     PlayState.STOPPED: MediaPlayerState.IDLE,
-                    PlayState.LOADING: MediaPlayerState.BUFFERING,
-                    None: MediaPlayerState.IDLE,
-                }.get(status)
+                }.get(status, MediaPlayerState.IDLE)
             else:
                 self._attr_state = MediaPlayerState.OFF
         except FSConnectionError:
@@ -136,10 +163,6 @@ class AFSAPIDevice(MediaPlayerEntity):
                 equalisers = await afsapi.get_equalisers()
             except FSNotImplementedException:
                 self._supports_sound_mode = False
-                # Remove SELECT_SOUND_MODE from the advertised supported features
-                self._attr_supported_features ^= (
-                    MediaPlayerEntityFeature.SELECT_SOUND_MODE
-                )
             else:
                 self.__sound_modes_by_label = {
                     sound_mode.label: sound_mode.key for sound_mode in equalisers
@@ -162,6 +185,7 @@ class AFSAPIDevice(MediaPlayerEntity):
 
             radio_mode = await afsapi.get_mode()
             self._attr_source = radio_mode.label if radio_mode is not None else None
+            self._current_mode_id = radio_mode.id if radio_mode is not None else None
 
             self._attr_is_volume_muted = await afsapi.get_mute()
             self._attr_media_image_url = await afsapi.get_play_graphic()
@@ -171,10 +195,6 @@ class AFSAPIDevice(MediaPlayerEntity):
                     eq_preset = await afsapi.get_eq_preset()
                 except FSNotImplementedException:
                     self._supports_sound_mode = False
-                    # Remove SELECT_SOUND_MODE from the advertised supported features
-                    self._attr_supported_features ^= (
-                        MediaPlayerEntityFeature.SELECT_SOUND_MODE
-                    )
                 else:
                     self._attr_sound_mode = (
                         eq_preset.label if eq_preset is not None else None
@@ -190,6 +210,7 @@ class AFSAPIDevice(MediaPlayerEntity):
             self._attr_media_album_name = None
 
             self._attr_source = None
+            self._current_mode_id = None
 
             self._attr_is_volume_muted = None
             self._attr_media_image_url = None
@@ -215,16 +236,9 @@ class AFSAPIDevice(MediaPlayerEntity):
         """Send pause command."""
         await self.fs_device.pause()
 
-    async def async_media_play_pause(self) -> None:
-        """Send play/pause command."""
-        if self._attr_state == MediaPlayerState.PLAYING:
-            await self.fs_device.pause()
-        else:
-            await self.fs_device.play()
-
     async def async_media_stop(self) -> None:
-        """Send play/pause command."""
-        await self.fs_device.pause()
+        """Send stop command."""
+        await self.fs_device.stop()
 
     async def async_media_previous_track(self) -> None:
         """Send previous track command (results in rewind)."""
