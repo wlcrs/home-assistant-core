@@ -113,6 +113,10 @@ class AFSAPIDevice(MediaPlayerEntity):
                 features |= MediaPlayerEntityFeature.NEXT_TRACK
             if self.__play_caps & PlayCaps.SEEK:
                 features |= MediaPlayerEntityFeature.SEEK
+            if self.__play_caps & (PlayCaps.REPEAT | PlayCaps.REPEAT_ONE):
+                features |= MediaPlayerEntityFeature.REPEAT_SET
+            if self.__play_caps & PlayCaps.SHUFFLE:
+                features |= MediaPlayerEntityFeature.SHUFFLE_SET
 
         if self._supports_sound_mode:
             features |= MediaPlayerEntityFeature.SELECT_SOUND_MODE
@@ -162,6 +166,28 @@ class AFSAPIDevice(MediaPlayerEntity):
             self.__play_caps = await afsapi.get_play_caps()
         except FSNotImplementedError:
             self.__play_caps = None
+
+        if self.__play_caps is None or not self.__play_caps & PlayCaps.REPEAT:
+            self._attr_repeat = RepeatMode.OFF
+        else:
+            try:
+                repeat_mode = await afsapi.get_play_repeat()
+            except FSNotImplementedError:
+                self._attr_repeat = RepeatMode.OFF
+            else:
+                self._attr_repeat = {
+                    PlayRepeatMode.OFF: RepeatMode.OFF,
+                    PlayRepeatMode.REPEAT_ALL: RepeatMode.ALL,
+                    PlayRepeatMode.REPEAT_ONE: RepeatMode.ONE,
+                }.get(repeat_mode, RepeatMode.OFF)
+
+        if self.__play_caps is None or not self.__play_caps & PlayCaps.SHUFFLE:
+            self._attr_shuffle = False
+        else:
+            try:
+                self._attr_shuffle = await afsapi.get_play_shuffle()
+            except FSNotImplementedError:
+                self._attr_shuffle = False
 
         if not self._attr_sound_mode_list and self._supports_sound_mode:
             try:
@@ -349,3 +375,25 @@ class AFSAPIDevice(MediaPlayerEntity):
 
         await self.async_update()
         self._attr_media_content_id = media_id
+
+    async def async_set_repeat(self, repeat: RepeatMode) -> None:
+        """Set repeat mode."""
+        if self.__play_caps is None or not self.__play_caps & PlayCaps.REPEAT:
+            _LOGGER.error("Device does not support repeat modes")
+            return
+
+        await self.fs_device.play_repeat(
+            {
+                RepeatMode.OFF: PlayRepeatMode.OFF,
+                RepeatMode.ALL: PlayRepeatMode.REPEAT_ALL,
+                RepeatMode.ONE: PlayRepeatMode.REPEAT_ONE,
+            }.get(repeat, PlayRepeatMode.OFF)
+        )
+
+    async def async_set_shuffle(self, shuffle: bool) -> None:
+        """Set shuffle mode."""
+        if self.__play_caps is None or not self.__play_caps & PlayCaps.SHUFFLE:
+            _LOGGER.error("Device does not support shuffle mode")
+            return
+
+        await self.fs_device.set_play_shuffle(shuffle)
